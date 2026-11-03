@@ -139,7 +139,7 @@ def main():
         observed = read_output(args.check)
         if observed != expected:
             raise SystemExit(f"FAIL: HDL output {observed} != golden {expected}")
-        print("PASS: results/output.txt matches the bit-accurate Python model")
+        print(f"PASS: {args.check} matches the bit-accurate Python model")
 
 
 if __name__ == "__main__":

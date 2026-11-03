@@ -9,12 +9,13 @@ A = approximate_softmax(S)
 O = A V
 ```
 
-The default demonstrator uses `N=2` tokens, embedding/key/value dimension `D=4`, signed INT8 input/weight files, a single time-multiplexed MAC datapath, and a hardware-friendly softmax approximation. The RTL contains no real-number arithmetic, delays, file I/O, or other simulation-only constructs. File loading, result checking, text output, and VCD dumping are isolated in the testbench.
+The default demonstrator uses `N=2` tokens, embedding/key/value dimension `D=4`, signed INT8 input/weight files, and a hardware-friendly softmax approximation. Two bit-exact architectures are included: a low-area time-multiplexed baseline and an aggressively unrolled nine-stage pipeline. The RTL contains no real-number arithmetic, delays, file I/O, or other simulation-only constructs. File loading, result checking, text output, and VCD dumping are isolated in the testbench.
 
 ## Repository layout
 
 ```text
-rtl/attention_core.sv   Synthesizable accelerator and controller
+rtl/attention_core.sv   Low-area sequential accelerator
+rtl/attention_core_pipelined.sv  Fully unrolled nine-stage accelerator
 tb/tb_attention.sv      Self-checking SystemVerilog testbench
 scripts/golden_model.py Bit-accurate model, float comparison, vector generator
 data/*.hex              Flattened row-major input and expected-output files
@@ -31,7 +32,7 @@ Requirements: Python 3, Icarus Verilog, and `make`.
 make test
 ```
 
-The command regenerates deterministic vectors, compiles the RTL with SystemVerilog-2012 enabled, runs the self-checking testbench, checks the output again with Python, and verifies that non-empty output and VCD files exist. A successful run ends with both messages:
+The command regenerates deterministic vectors, compiles both RTL architectures with SystemVerilog-2012 enabled, runs the self-checking testbench on each, checks both outputs again with Python, and verifies that all output and VCD files exist. A successful run reports 141 cycles for the sequential core, 8 cycles for the pipelined core, and bit-exact PASS results for both.
 
 ```text
 PASS: all 8 output elements match bit-exact golden data
@@ -42,8 +43,10 @@ Useful individual commands:
 
 ```sh
 make vectors   # regenerate data/*.hex
-make sim       # compile and run the HDL testbench
-make verify    # simulate, run Python check, and check generated artifacts
+make sim       # run the low-area sequential architecture
+make sim-pipelined      # run the high-throughput architecture
+make verify    # verify the sequential architecture
+make verify-pipelined   # verify the pipelined architecture
 make clean     # remove generated build/ and results/
 python3 scripts/golden_model.py   # print all reference intermediates
 ```
@@ -101,7 +104,7 @@ For this example, the largest absolute output error versus ideal floating-point 
                   output MAC -> O buffer -> read port
 ```
 
-The FSM executes nine phases: `IDLE`, `Q`, `K`, `V`, `SCORE`, `ROW_MAX`, `EXP`, `NORMALIZE`, `OUTPUT`, and `DONE`. One dot-product term is consumed per cycle. This intentionally favors low area and clear control over throughput. The default compute takes 140 state-work cycles plus one cycle to raise `done` after `start` is accepted; input streaming is separate.
+The baseline FSM executes `IDLE`, `Q`, `K`, `V`, `SCORE`, `ROW_MAX`, `EXP`, `NORMALIZE`, `OUTPUT`, and `DONE`. One dot-product term is consumed per cycle. This intentionally favors low area and clear control over throughput. The measured default latency is 141 cycles from accepted `start` to `done`; input streaming is separate.
 
 Approximate cycle count for square `D` matrices is:
 
@@ -110,6 +113,28 @@ Approximate cycle count for square `D` matrices is:
 ```
 
 The first term forms Q/K/V, the second forms scores, `3*N*N` performs max/LUT/normalization, and the fourth forms O.
+
+## Aggressively pipelined architecture
+
+`attention_core_pipelined.sv` preserves exactly the same load/start/output interface and arithmetic contract but spatially unrolls every matrix element and inserts registers at the expensive boundaries:
+
+```text
+1. X*WQ / X*WK / X*WV products (all lanes in parallel)
+2. Q/K/V reduction, rounding, saturation
+3. Q*K products
+4. Score reduction, scaling, saturation
+5. Per-row maximum
+6. Exponential LUT and row sum
+7. Integer normalization
+8. Attention-weight*V products
+9. Output reduction, rounding, saturation
+```
+
+The testbench measures 8 clocks from accepted `start` to `done`, versus 141 clocks for the sequential baseline: a `17.625x` single-transaction compute-latency reduction for the default dimensions. The nine registered operations span the launch edge through the output edge, hence eight elapsed clock periods.
+
+The speed comes from a deliberately aggressive area trade-off. Before synthesis optimization, the default `N=2, D=4` dataflow exposes 96 Q/K/V multipliers, 16 score multipliers, and 16 output multipliers (128 total), compared with the baseline's time-multiplexed arithmetic. It also exposes four parallel normalization divisions. These are architectural operator counts, not post-synthesis DSP or gate counts; synthesis can merge constant or redundant logic.
+
+The current file-loading wrapper accepts one transaction at a time, so this demonstrator uses pipelining to minimize latency rather than to overlap independent input matrices. A streaming or ping-pong-buffered wrapper could allow the nine stages to process different transactions concurrently. The normalization divider remains the likely critical path; a production version should pipeline a reciprocal LUT/multiply or iterative reciprocal unit.
 
 ## Fixed-point formats and bit growth
 
@@ -148,7 +173,7 @@ This compact design uses a synthesizable integer `/` operator. It is excellent f
 
 Each `.hex` file contains one two's-complement word per line in flattened row-major order. X has `N*D` bytes; each weight matrix has `D*D` bytes. For example, Q4.4 values `1.0`, `0.5`, and `-1.0` are encoded as `10`, `08`, and `f0`.
 
-The testbench reads all input files with `$readmemh`, streams them into the synthesizable load interface, starts the core, waits with a timeout, and reads the output port. It writes `results/output.txt` as a signed integer matrix and dumps all signals to `results/attention.vcd`. It also compares every output element against `data/expected_o.hex` and exits nonzero on a mismatch.
+The testbench reads all input files with `$readmemh`, streams them into the synthesizable load interface, starts the core, waits with a timeout, and reads the output port. The sequential run writes `results/output.txt` and `results/attention.vcd`; the high-throughput run writes `results/output_pipelined.txt` and `results/attention_pipelined.vcd`. Both compare every output element against `data/expected_o.hex` and exit nonzero on a mismatch.
 
 ## Parameter changes
 
@@ -162,7 +187,7 @@ The current testbench and Python model intentionally fix `N=2, D=4` to provide o
 
 ## Design trade-offs and extension path
 
-- **Area vs latency:** one reused MAC minimizes multiplier count but takes one cycle per dot-product term. Multiple lanes or a systolic array can raise throughput.
+- **Area vs latency:** the included endpoints make this trade-off concrete: the sequential core takes 141 cycles with heavily reused arithmetic, while the unrolled pipeline takes 8 cycles but exposes 128 multipliers for the default shape.
 - **Precision vs storage/bandwidth:** INT8 Q4.4 inputs align with quantized inference and reduce memory traffic. Wider Q/K/V buffers protect accumulated precision.
 - **Softmax accuracy vs cost:** row-max subtraction plus a small LUT is stable and cheap. Finer LUT spacing, interpolation, or base-2 exponentiation improves accuracy at added area.
 - **Divider cost:** the prototype's `/` keeps behavior transparent. A reciprocal unit is the most important production optimization.
@@ -187,7 +212,7 @@ The test is deterministic and uses only the Python standard library.
 
 ## Synthesis notes
 
-`rtl/attention_core.sv` is synthesizable SystemVerilog. The testbench, file I/O, and VCD calls are intentionally separate. Exact inferred resources depend on synthesis settings: array memories may become registers for this tiny instance, mutually exclusive multiply expressions may share a DSP after optimization, and integer normalization may infer a large divider. Synthesis reports—not RTL operator counts—should be used for final area and timing claims.
+Both files under `rtl/` are synthesizable SystemVerilog. The testbench, file I/O, and VCD calls are intentionally separate. Exact inferred resources depend on synthesis settings: array memories may become registers for this tiny instance, mutually exclusive baseline expressions may share a DSP, unrolled products may map to many DSPs, and integer normalization may infer large combinational dividers. Synthesis reports—not RTL operator counts—must be used for final area, frequency, and power claims.
 
 ## License
 

@@ -24,15 +24,25 @@ module tb_attention;
     reg [7:0] wv_data [0:DD-1];
     reg [15:0] expected [0:XD-1];
     integer i, errors, fd;
+    integer latency_cycles;
+    time launch_time;
     reg signed [15:0] observed;
 
+`ifdef PIPELINED_DUT
+    attention_core_pipelined #(.N(N), .D(D), .SCALE_MUL_Q(128)) dut (
+`else
     attention_core #(.N(N), .D(D), .SCALE_MUL_Q(128)) dut (
+`endif
         .clk(clk), .rst_n(rst_n), .load_we(load_we), .load_sel(load_sel),
         .load_addr(load_addr), .load_data(load_data), .start(start),
         .busy(busy), .done(done), .out_addr(out_addr), .out_data(out_data)
     );
 
     always #5 clk = ~clk;
+
+    always @(posedge clk)
+        if (start && !busy)
+            launch_time = $time;
 
     task load_matrix;
         input [1:0] sel;
@@ -57,7 +67,11 @@ module tb_attention;
     endtask
 
     initial begin
+`ifdef PIPELINED_DUT
+        $dumpfile("results/attention_pipelined.vcd");
+`else
         $dumpfile("results/attention.vcd");
+`endif
         $dumpvars(0, tb_attention);
         $readmemh("data/x.hex", x_data);
         $readmemh("data/wq.hex", wq_data);
@@ -78,6 +92,8 @@ module tb_attention;
         fork
             begin
                 wait(done);
+                latency_cycles = ($time - launch_time) / 10;
+                $display("LATENCY: %0d cycles from accepted start to done", latency_cycles);
             end
             begin
                 repeat (5000) @(posedge clk);
@@ -87,7 +103,11 @@ module tb_attention;
         join_any
         disable fork;
 
+`ifdef PIPELINED_DUT
+        fd = $fopen("results/output_pipelined.txt", "w");
+`else
         fd = $fopen("results/output.txt", "w");
+`endif
         if (fd == 0) begin
             $display("FAIL: could not open results/output.txt");
             $finish_and_return(1);
