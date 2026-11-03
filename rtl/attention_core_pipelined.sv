@@ -1,75 +1,77 @@
 `timescale 1ns/1ps
+`default_nettype none
 
 // High-throughput, spatially unrolled alternative to attention_core.sv.
 // Registers separate multiply, reduction, scaling, softmax, and output phases.
 module attention_core_pipelined #(
-    parameter integer N              = 2,
-    parameter integer D              = 4,
-    parameter integer DATA_W         = 8,
-    parameter integer DATA_FRAC      = 4,
-    parameter integer VEC_W          = 16,
-    parameter integer SCORE_W        = 24,
-    parameter integer WEIGHT_W       = 9,
-    parameter integer WEIGHT_FRAC    = 8,
-    parameter integer SCALE_FRAC     = 8,
-    parameter integer SCALE_MUL_Q     = 128
+    parameter int N              = 2,
+    parameter int D              = 4,
+    parameter int DATA_W         = 8,
+    parameter int DATA_FRAC      = 4,
+    parameter int VEC_W          = 16,
+    parameter int SCORE_W        = 24,
+    parameter int WEIGHT_W       = 9,
+    parameter int WEIGHT_FRAC    = 8,
+    parameter int SCALE_FRAC     = 8,
+    parameter int SCALE_MUL_Q     = 128
 ) (
-    input  wire                         clk,
-    input  wire                         rst_n,
-    input  wire                         load_we,
-    input  wire [1:0]                   load_sel,
-    input  wire [$clog2(((N*D) > (D*D)) ? (N*D) : (D*D))-1:0] load_addr,
-    input  wire signed [DATA_W-1:0]     load_data,
-    input  wire                         start,
-    output reg                          busy,
-    output reg                          done,
-    input  wire [$clog2(N*D)-1:0]       out_addr,
-    output wire signed [VEC_W-1:0]      out_data
+    input  logic                         clk,
+    input  logic                         rst_n,
+    input  logic                         load_we,
+    input  logic [1:0]                   load_sel,
+    input  logic [$clog2(((N*D) > (D*D)) ? (N*D) : (D*D))-1:0] load_addr,
+    input  logic signed [DATA_W-1:0]     load_data,
+    input  logic                         start,
+    output logic                         busy,
+    output logic                         done,
+    input  logic [$clog2(N*D)-1:0]       out_addr,
+    output logic signed [VEC_W-1:0]      out_data
 );
 
-    localparam integer XD_SIZE = N*D;
-    localparam integer DD_SIZE = D*D;
-    localparam integer NN_SIZE = N*N;
+    localparam int XD_SIZE = N*D;
+    localparam int DD_SIZE = D*D;
+    localparam int NN_SIZE = N*N;
 
-    reg signed [DATA_W-1:0] x_mem  [0:XD_SIZE-1];
-    reg signed [DATA_W-1:0] wq_mem [0:DD_SIZE-1];
-    reg signed [DATA_W-1:0] wk_mem [0:DD_SIZE-1];
-    reg signed [DATA_W-1:0] wv_mem [0:DD_SIZE-1];
+    logic signed [DATA_W-1:0] x_mem  [0:XD_SIZE-1];
+    logic signed [DATA_W-1:0] wq_mem [0:DD_SIZE-1];
+    logic signed [DATA_W-1:0] wk_mem [0:DD_SIZE-1];
+    logic signed [DATA_W-1:0] wv_mem [0:DD_SIZE-1];
 
-    reg signed [VEC_W-1:0] q_mem [0:XD_SIZE-1];
-    reg signed [VEC_W-1:0] k_mem [0:XD_SIZE-1];
-    reg signed [VEC_W-1:0] v_mem [0:XD_SIZE-1];
-    reg signed [SCORE_W-1:0] score_mem [0:NN_SIZE-1];
-    reg        [WEIGHT_W-1:0] weight_mem [0:NN_SIZE-1];
-    reg signed [VEC_W-1:0] o_mem [0:XD_SIZE-1];
+    logic signed [VEC_W-1:0] q_mem [0:XD_SIZE-1];
+    logic signed [VEC_W-1:0] k_mem [0:XD_SIZE-1];
+    logic signed [VEC_W-1:0] v_mem [0:XD_SIZE-1];
+    logic signed [SCORE_W-1:0] score_mem [0:NN_SIZE-1];
+    logic        [WEIGHT_W-1:0] weight_mem [0:NN_SIZE-1];
+    logic signed [VEC_W-1:0] o_mem [0:XD_SIZE-1];
 
-    reg signed [(2*DATA_W)-1:0] q_product [0:N*D*D-1];
-    reg signed [(2*DATA_W)-1:0] k_product [0:N*D*D-1];
-    reg signed [(2*DATA_W)-1:0] v_product [0:N*D*D-1];
-    reg signed [(2*VEC_W)-1:0] score_product [0:N*N*D-1];
-    reg signed [SCORE_W-1:0] row_max_mem [0:N-1];
-    reg        [WEIGHT_W-1:0] exp_mem [0:NN_SIZE-1];
-    reg        [31:0] exp_sum_mem [0:N-1];
-    reg signed [WEIGHT_W+VEC_W:0] out_product [0:N*D*N-1];
+    logic signed [(2*DATA_W)-1:0] q_product [0:N*D*D-1];
+    logic signed [(2*DATA_W)-1:0] k_product [0:N*D*D-1];
+    logic signed [(2*DATA_W)-1:0] v_product [0:N*D*D-1];
+    logic signed [(2*VEC_W)-1:0] score_product [0:N*N*D-1];
+    logic signed [SCORE_W-1:0] row_max_mem [0:N-1];
+    logic        [WEIGHT_W-1:0] exp_mem [0:NN_SIZE-1];
+    logic        [31:0] exp_sum_mem [0:N-1];
+    logic signed [WEIGHT_W+VEC_W:0] out_product [0:N*D*N-1];
 
     // [0] QKV products, [1] QKV reduction, [2] score products,
     // [3] score reduction, [4] row max, [5] exp/sum,
     // [6] normalization, [7] output products.
-    reg [7:0] pipe_valid;
-    integer i, j, k;
-    reg signed [63:0] acc_q_tmp, acc_k_tmp, acc_v_tmp;
-    reg signed [63:0] acc_s_tmp, acc_o_tmp;
-    reg signed [63:0] scaled_tmp;
-    reg signed [SCORE_W-1:0] row_max_tmp;
-    reg [31:0] exp_sum_tmp;
-    reg [63:0] norm_num_tmp;
+    logic [7:0] pipe_valid;
+    int i, j, k;
+    logic signed [63:0] acc_q_tmp, acc_k_tmp, acc_v_tmp;
+    logic signed [63:0] acc_s_tmp, acc_o_tmp;
+    logic signed [63:0] scaled_tmp;
+    logic signed [SCORE_W-1:0] row_max_tmp;
+    logic [31:0] exp_sum_tmp;
+    logic [63:0] norm_num_tmp;
 
     assign out_data = o_mem[out_addr];
 
-    function automatic signed [63:0] round_shift;
-        input signed [63:0] value;
-        input integer shift;
-        reg signed [63:0] magnitude;
+    function automatic logic signed [63:0] round_shift(
+        input logic signed [63:0] value,
+        input int shift
+    );
+        logic signed [63:0] magnitude;
         begin
             if (shift == 0)
                 round_shift = value;
@@ -82,9 +84,10 @@ module attention_core_pipelined #(
         end
     endfunction
 
-    function automatic signed [VEC_W-1:0] sat_vec;
-        input signed [63:0] value;
-        reg signed [63:0] vmax, vmin;
+    function automatic logic signed [VEC_W-1:0] sat_vec(
+        input logic signed [63:0] value
+    );
+        logic signed [63:0] vmax, vmin;
         begin
             vmax = (64'sd1 <<< (VEC_W-1)) - 1;
             vmin = -(64'sd1 <<< (VEC_W-1));
@@ -94,9 +97,10 @@ module attention_core_pipelined #(
         end
     endfunction
 
-    function automatic signed [SCORE_W-1:0] sat_score;
-        input signed [63:0] value;
-        reg signed [63:0] smax, smin;
+    function automatic logic signed [SCORE_W-1:0] sat_score(
+        input logic signed [63:0] value
+    );
+        logic signed [63:0] smax, smin;
         begin
             smax = (64'sd1 <<< (SCORE_W-1)) - 1;
             smin = -(64'sd1 <<< (SCORE_W-1));
@@ -106,9 +110,10 @@ module attention_core_pipelined #(
         end
     endfunction
 
-    function automatic [WEIGHT_W-1:0] exp_lut;
-        input signed [SCORE_W-1:0] delta;
-        integer half;
+    function automatic logic [WEIGHT_W-1:0] exp_lut(
+        input logic signed [SCORE_W-1:0] delta
+    );
+        int half;
         begin
             half = (1 <<< (DATA_FRAC-1));
             if      (delta >= -half/2)       exp_lut = 9'd256;
@@ -127,7 +132,7 @@ module attention_core_pipelined #(
         end
     endfunction
 
-    always @(posedge clk) begin
+    always_ff @(posedge clk) begin
         if (load_we && !busy) begin
             case (load_sel)
                 2'd0: x_mem[load_addr]  <= load_data;
@@ -138,7 +143,7 @@ module attention_core_pipelined #(
         end
     end
 
-    always @(posedge clk or negedge rst_n) begin
+    always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             busy       <= 1'b0;
             done       <= 1'b0;
@@ -269,3 +274,5 @@ module attention_core_pipelined #(
         end
     end
 endmodule
+
+`default_nettype wire

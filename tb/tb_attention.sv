@@ -1,32 +1,33 @@
 `timescale 1ns/1ps
+`default_nettype none
 
 module tb_attention;
-    localparam integer N = 2;
-    localparam integer D = 4;
-    localparam integer XD = N*D;
-    localparam integer DD = D*D;
-    localparam integer LOAD_AW = $clog2((XD > DD) ? XD : DD);
+    localparam int N = 2;
+    localparam int D = 4;
+    localparam int XD = N*D;
+    localparam int DD = D*D;
+    localparam int LOAD_AW = $clog2((XD > DD) ? XD : DD);
 
-    reg clk = 0;
-    reg rst_n = 0;
-    reg load_we = 0;
-    reg [1:0] load_sel = 0;
-    reg [LOAD_AW-1:0] load_addr = 0;
-    reg signed [7:0] load_data = 0;
-    reg start = 0;
-    wire busy, done;
-    reg [$clog2(XD)-1:0] out_addr = 0;
-    wire signed [15:0] out_data;
+    logic clk = 0;
+    logic rst_n = 0;
+    logic load_we = 0;
+    logic [1:0] load_sel = 0;
+    logic [LOAD_AW-1:0] load_addr = 0;
+    logic signed [7:0] load_data = 0;
+    logic start = 0;
+    logic busy, done;
+    logic [$clog2(XD)-1:0] out_addr = 0;
+    logic signed [15:0] out_data;
 
-    reg [7:0] x_data  [0:XD-1];
-    reg [7:0] wq_data [0:DD-1];
-    reg [7:0] wk_data [0:DD-1];
-    reg [7:0] wv_data [0:DD-1];
-    reg [15:0] expected [0:XD-1];
-    integer i, errors, fd;
-    integer latency_cycles;
+    logic [7:0] x_data  [0:XD-1];
+    logic [7:0] wq_data [0:DD-1];
+    logic [7:0] wk_data [0:DD-1];
+    logic [7:0] wv_data [0:DD-1];
+    logic [15:0] expected [0:XD-1];
+    int i, errors, fd;
+    int latency_cycles;
     time launch_time;
-    reg signed [15:0] observed;
+    logic signed [15:0] observed;
 
 `ifdef PIPELINED_DUT
     attention_core_pipelined #(.N(N), .D(D), .SCALE_MUL_Q(128)) dut (
@@ -40,14 +41,15 @@ module tb_attention;
 
     always #5 clk = ~clk;
 
-    always @(posedge clk)
+    always_ff @(posedge clk)
         if (start && !busy)
             launch_time = $time;
 
-    task load_matrix;
-        input [1:0] sel;
-        input integer count;
-        integer idx;
+    task automatic load_matrix(
+        input logic [1:0] sel,
+        input int count
+    );
+        int idx;
         begin
             for (idx = 0; idx < count; idx = idx + 1) begin
                 @(negedge clk);
@@ -137,3 +139,5 @@ module tb_attention;
         end
     end
 endmodule
+
+`default_nettype wire
