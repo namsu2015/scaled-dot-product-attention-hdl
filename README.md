@@ -1,69 +1,106 @@
-# Synthesizable Fixed-Point Scaled Dot-Product Attention
+# Fixed-Point Scaled Dot-Product Attention in SystemVerilog
 
-This repository implements and verifies a compact scaled dot-product attention accelerator in synthesizable SystemVerilog:
-
-```text
-Q = X WQ,  K = X WK,  V = X WV
-S = Q K^T / sqrt(d_k)
-A = approximate_softmax(S)
-O = A V
-```
-
-The default demonstrator uses `N=2` tokens, embedding/key/value dimension `D=4`, signed INT8 input/weight files, and a hardware-friendly softmax approximation. Two bit-exact architectures are included: a low-area time-multiplexed baseline and an aggressively unrolled nine-stage pipeline. The RTL contains no real-number arithmetic, delays, file I/O, or other simulation-only constructs. File loading, result checking, text output, and VCD dumping are isolated in the testbench.
-
-## Repository layout
+This project implements
 
 ```text
-rtl/attention_core.sv   Low-area sequential accelerator
-rtl/attention_core_pipelined.sv  Fully unrolled nine-stage accelerator
-tb/tb_attention.sv      Self-checking SystemVerilog testbench
-scripts/golden_model.py Bit-accurate model, float comparison, vector generator
-data/*.hex              Flattened row-major input and expected-output files
-results/output.txt      Generated signed fixed-point output matrix
-results/attention.vcd   Generated waveform
-Makefile                Reproducible simulation and verification flow
+Q = XWQ
+K = XWK
+V = XWV
+S = QK^T / sqrt(d_k)
+A = softmax(S)
+O = AV
 ```
 
-## Quick start
+in synthesizable SystemVerilog. The default test uses two tokens and an embedding dimension of four. Inputs and weights are signed INT8 values read from text files.
 
-Requirements: Python 3, Icarus Verilog, and `make`.
+Two implementations are included:
+
+- `attention_core.sv`: one reused datapath with low hardware cost
+- `attention_core_pipelined.sv`: unrolled nine-stage pipeline with lower latency
+
+Both implementations produce the same fixed-point result.
+
+## Test result
+
+The design was compiled and simulated with Icarus Verilog 12.0.
+
+```text
+Sequential core: 141 cycles, PASS
+Pipelined core:    8 cycles, PASS
+```
+
+The pipelined core reduces compute latency by `141 / 8 = 17.625x` for the supplied test. This is not an area-normalized speedup; the pipelined version uses much more parallel hardware.
+
+The maximum absolute output error relative to the floating-point calculation is `0.009471` for this example.
+
+## Files
+
+```text
+rtl/attention_core.sv             Sequential RTL
+rtl/attention_core_pipelined.sv   Pipelined RTL
+tb/tb_attention.sv                Self-checking testbench
+scripts/golden_model.py           Bit-accurate Python model
+data/x.hex                        Input tokens
+data/wq.hex                       Query weights
+data/wk.hex                       Key weights
+data/wv.hex                       Value weights
+data/expected_o.hex               Expected fixed-point output
+results/output.txt                Sequential output
+results/output_pipelined.txt      Pipelined output
+results/attention.vcd             Sequential waveform
+results/attention_pipelined.vcd   Pipelined waveform
+Makefile                          Build and test commands
+```
+
+## Running the test
+
+Requirements:
+
+- Python 3
+- Icarus Verilog
+- Make
+
+Run both implementations:
 
 ```sh
 make test
 ```
 
-The command regenerates deterministic vectors, compiles both RTL architectures with SystemVerilog-2012 enabled, runs the self-checking testbench on each, checks both outputs again with Python, and verifies that all output and VCD files exist. A successful run reports 141 cycles for the sequential core, 8 cycles for the pipelined core, and bit-exact PASS results for both.
-
-```text
-PASS: all 8 output elements match bit-exact golden data
-PASS: results/output.txt matches the bit-accurate Python model
-```
-
-Useful individual commands:
+Run them separately:
 
 ```sh
-make vectors   # regenerate data/*.hex
-make sim       # run the low-area sequential architecture
-make sim-pipelined      # run the high-throughput architecture
-make verify    # verify the sequential architecture
-make verify-pipelined   # verify the pipelined architecture
-make clean     # remove generated build/ and results/
-python3 scripts/golden_model.py   # print all reference intermediates
+make verify
+make verify-pipelined
 ```
 
-Open `results/attention.vcd` in GTKWave if desired:
+The expected messages are:
+
+```text
+LATENCY: 141 cycles from accepted start to done
+PASS: all 8 output elements match bit-exact golden data
+PASS: results/output.txt matches the bit-accurate Python model
+
+LATENCY: 8 cycles from accepted start to done
+PASS: all 8 output elements match bit-exact golden data
+PASS: results/output_pipelined.txt matches the bit-accurate Python model
+```
+
+Waveforms can be opened with GTKWave:
 
 ```sh
 gtkwave results/attention.vcd
+gtkwave results/attention_pipelined.vcd
 ```
 
-## Small numerical example
+## Numerical example
 
-All values below are shown as stored integers. Divide Q/K/V/scores/outputs by 16 and attention weights by 256 to obtain their real values.
+The stored integer values are shown below. Divide Q, K, V, S, and O by 16. Divide A by 256.
 
 ```text
-X = [[16,  0, 16,  0],     WQ = WK = 16 * identity
+X = [[16,  0, 16,  0],
      [ 0, 16,  0, 16]]
+
+WQ = WK = 16 * identity
 
 WV = [[16,  8,  0,  0],
       [ 0, 16,  8,  0],
@@ -76,148 +113,169 @@ Q = K = [[16,  0, 16,  0],
 V = [[16,  8, 16,  8],
      [ 8, 16,  8, 16]]
 
-S = [[16,  0],             A(Q0.8) = [[187,  69],
-     [ 0, 16]]                         [ 69, 187]]
+S = [[16,  0],
+     [ 0, 16]]
+
+A = [[187,  69],
+     [ 69, 187]]
 
 O = [[14, 10, 14, 10],
      [10, 14, 10, 14]]
 ```
 
-For this example, the largest absolute output error versus ideal floating-point attention is `0.009471` in real-value units.
-
-## Architecture
+The output text files therefore contain:
 
 ```text
- load interface
-      |
-  X/WQ/WK/WV memories
-      |
-      v
- time-multiplexed signed MAC <---- controller FSM
-      |              |                 |
-   Q/K/V buffers  score buffer     loop indices
-                         |
-              row max -> exp LUT -> integer normalization
-                         |
-                   weight buffer
-                         |
-                  output MAC -> O buffer -> read port
+14 10 14 10
+10 14 10 14
 ```
 
-The baseline FSM executes `IDLE`, `Q`, `K`, `V`, `SCORE`, `ROW_MAX`, `EXP`, `NORMALIZE`, `OUTPUT`, and `DONE`. One dot-product term is consumed per cycle. This intentionally favors low area and clear control over throughput. The measured default latency is 141 cycles from accepted `start` to `done`; input streaming is separate.
+## Fixed-point formats
 
-Approximate cycle count for square `D` matrices is:
+| Value | Format | Real value |
+|---|---:|---:|
+| X and weights | signed 8-bit, 4 fractional bits | stored value / 16 |
+| Q, K, V, O | signed 16-bit, 4 fractional bits | stored value / 16 |
+| Scores | signed 24-bit, 4 fractional bits | stored value / 16 |
+| Scale constant | unsigned Q0.8 | stored value / 256 |
+| Exponential and attention weights | unsigned Q0.8 | stored value / 256 |
+| Accumulators | signed 64-bit | full intermediate precision |
+
+For `D=4`,
 
 ```text
-3*N*D*D + N*N*D + 3*N*N + N*N*D + 1(done)
+1 / sqrt(D) = 0.5
+SCALE_MUL_Q = round(0.5 * 256) = 128
 ```
 
-The first term forms Q/K/V, the second forms scores, `3*N*N` performs max/LUT/normalization, and the fourth forms O.
+Matrix products keep their full fractional precision during accumulation. Requantization uses symmetric round-to-nearest with ties away from zero. Q, K, V, scores, and outputs saturate at their destination width rather than wrapping.
 
-## Aggressively pipelined architecture
-
-`attention_core_pipelined.sv` preserves exactly the same load/start/output interface and arithmetic contract but spatially unrolls every matrix element and inserts registers at the expensive boundaries:
-
-```text
-1. X*WQ / X*WK / X*WV products (all lanes in parallel)
-2. Q/K/V reduction, rounding, saturation
-3. Q*K products
-4. Score reduction, scaling, saturation
-5. Per-row maximum
-6. Exponential LUT and row sum
-7. Integer normalization
-8. Attention-weight*V products
-9. Output reduction, rounding, saturation
-```
-
-The testbench measures 8 clocks from accepted `start` to `done`, versus 141 clocks for the sequential baseline: a `17.625x` single-transaction compute-latency reduction for the default dimensions. The nine registered operations span the launch edge through the output edge, hence eight elapsed clock periods.
-
-The speed comes from a deliberately aggressive area trade-off. Before synthesis optimization, the default `N=2, D=4` dataflow exposes 96 Q/K/V multipliers, 16 score multipliers, and 16 output multipliers (128 total), compared with the baseline's time-multiplexed arithmetic. It also exposes four parallel normalization divisions. These are architectural operator counts, not post-synthesis DSP or gate counts; synthesis can merge constant or redundant logic.
-
-The current file-loading wrapper accepts one transaction at a time, so this demonstrator uses pipelining to minimize latency rather than to overlap independent input matrices. A streaming or ping-pong-buffered wrapper could allow the nine stages to process different transactions concurrently. The normalization divider remains the likely critical path; a production version should pipeline a reciprocal LUT/multiply or iterative reciprocal unit.
-
-## Fixed-point formats and bit growth
-
-| Quantity | Stored format | Meaning |
-|---|---:|---|
-| X, WQ, WK, WV | signed 8-bit Q4.4 | integer value / 16 |
-| Q, K, V, O | signed 16-bit Q12.4 | integer value / 16 |
-| score S | signed 24-bit, 4 fractional bits | integer value / 16 |
-| `1/sqrt(D)` constant | unsigned Q0.8 | default `128/256 = 0.5` |
-| exp LUT result | unsigned Q0.8 | 0 through 256 |
-| normalized weight | unsigned Q0.8 | 0 through 256 |
-| accumulators | signed 64-bit | conservative guard width |
-
-Matrix multiplication produces a Q8.8 product. The accumulator retains all product fractional bits, then `round_shift(..., 4)` returns to four fractional bits. Scores multiply two Q12.4 values (eight fractional bits), then multiply by the Q0.8 scale constant and shift by 12 to return to four fractional bits. Output accumulation multiplies Q0.8 weights by Q12.4 values and shifts by eight.
-
-Rounding is symmetric round-to-nearest with ties away from zero. Q/K/V, score, and output writes saturate to their destination widths instead of wrapping. The 64-bit accumulator makes overflow impossible for the supplied dimensions; for much larger parameters, its bound must be re-evaluated. A conservative Q/K/V dot-product bound is `D * (2^(VEC_W-1))^2`.
+The 64-bit accumulator is larger than required for the default dimensions. Its bound must be checked again if N, D, or the vector width is increased substantially.
 
 ## Softmax approximation
 
-Each score row first subtracts its maximum. This is the standard numerical-stability transform and guarantees at least one LUT input is zero. A 12-entry piecewise-constant LUT approximates `exp(x)` from 0 to -5.5 in steps of 0.5, returning Q0.8 values:
+The softmax unit first subtracts the largest value in each row. This prevents the exponential input from becoming positive and guarantees that at least one LUT output is nonzero.
+
+The exponential is approximated by a Q0.8 lookup table with 0.5-wide bins:
+
+| Input | LUT output |
+|---:|---:|
+| 0.0 | 256 |
+| -0.5 | 155 |
+| -1.0 | 94 |
+| -1.5 | 57 |
+| -2.0 | 35 |
+| -2.5 | 21 |
+| -3.0 | 13 |
+| -3.5 | 8 |
+| -4.0 | 5 |
+| -4.5 | 3 |
+| -5.0 | 2 |
+| -5.5 | 1 |
+
+Smaller inputs map to zero. The weights are computed as
 
 ```text
-x:       0  -0.5  -1.0  -1.5  -2.0  ...  -5.5  below -5.75
-exp_Q8: 256   155    94     57     35  ...     1       0
+A[i] = round(exp[i] * 256 / sum(exp))
 ```
 
-The weights use rounded integer normalization:
+The RTL uses the synthesizable `/` operator for normalization. A synthesis tool may infer a large combinational divider. A reciprocal LUT followed by a multiply, or a multi-cycle reciprocal unit, would be a better choice in a larger accelerator.
+
+## Sequential architecture
+
+The sequential core uses an FSM and reuses its arithmetic across matrix elements.
 
 ```text
-weight_i = round(exp_i * 256 / sum(exp))
+load -> Q -> K -> V -> scores -> row max -> exp -> normalize -> output
 ```
 
-This compact design uses a synthesizable integer `/` operator. It is excellent for a concise verified prototype, but a production accelerator would normally replace the inferred combinational divider with a reciprocal LUT plus multiply, Newton iteration, or a multi-cycle divider. Independent rounding means a row can differ slightly from an exact sum of 256; the output model intentionally reproduces that behavior.
+One dot-product term is handled per clock. For square D matrices, the default schedule is approximately
 
-## Input and output files
+```text
+3*N*D*D + N*N*D + 3*N*N + N*N*D + 1
+```
 
-Each `.hex` file contains one two's-complement word per line in flattened row-major order. X has `N*D` bytes; each weight matrix has `D*D` bytes. For example, Q4.4 values `1.0`, `0.5`, and `-1.0` are encoded as `10`, `08`, and `f0`.
+cycles. For `N=2, D=4`, the measured latency is 141 cycles.
 
-The testbench reads all input files with `$readmemh`, streams them into the synthesizable load interface, starts the core, waits with a timeout, and reads the output port. The sequential run writes `results/output.txt` and `results/attention.vcd`; the high-throughput run writes `results/output_pipelined.txt` and `results/attention_pipelined.vcd`. Both compare every output element against `data/expected_o.hex` and exit nonzero on a mismatch.
+This version is useful as a bit-accurate reference and as a low-area implementation.
+
+## Pipelined architecture
+
+The pipelined core separates the work into these registered stages:
+
+```text
+1. X*W products for Q, K, and V
+2. Q/K/V reduction and requantization
+3. Q*K products
+4. Score reduction and scaling
+5. Row maximum
+6. Exponential lookup and row sum
+7. Weight normalization
+8. Attention-weight*V products
+9. Output reduction and requantization
+```
+
+All matrix elements in a stage are spatially unrolled. For the default configuration, the RTL exposes the following multiply operations before synthesis optimization:
+
+```text
+Q/K/V stage:  3*N*D*D = 96
+Score stage:  N*N*D   = 16
+Output stage: N*D*N   = 16
+Total:                    128
+```
+
+It also exposes four parallel normalization divisions. These are RTL operator counts, not final DSP or gate counts. Only a synthesis report can give reliable area, timing, and power numbers.
+
+The current input interface loads one matrix and then starts one calculation, so it does not overlap separate input transactions. Ping-pong input buffers or a streaming interface would be needed to use the stage pipeline across multiple attention operations.
+
+## Input and output format
+
+Input files contain one hexadecimal two's-complement value per line in row-major order.
+
+For signed 8-bit values with four fractional bits:
+
+```text
+1.0  -> 10
+0.5  -> 08
+-1.0 -> f0
+```
+
+X contains `N*D` entries. Each weight file contains `D*D` entries. The testbench reads these files with `$readmemh`, loads the core through its write interface, starts the calculation, checks every output, writes a decimal text matrix, and creates a VCD file.
 
 ## Parameter changes
 
-`N`, `D`, widths, and fractional widths are RTL parameters. When changing `D`, also set:
+The RTL parameters include N, D, bit widths, and fractional widths. When D changes, update
 
 ```text
 SCALE_MUL_Q = round(256 / sqrt(D))
 ```
 
-The current testbench and Python model intentionally fix `N=2, D=4` to provide one reproducible interview example. To create another configuration, update their constants and matrices together. The core loop structure itself does not assume the default dimensions. Ensure `$clog2(N*D)` is nonzero (practically, `N*D >= 2`) and re-check accumulator bounds for large designs.
+The supplied testbench and Python model use fixed `N=2, D=4` constants. They must be changed together when testing another shape.
 
-## Design trade-offs and extension path
+## Verification
 
-- **Area vs latency:** the included endpoints make this trade-off concrete: the sequential core takes 141 cycles with heavily reused arithmetic, while the unrolled pipeline takes 8 cycles but exposes 128 multipliers for the default shape.
-- **Precision vs storage/bandwidth:** INT8 Q4.4 inputs align with quantized inference and reduce memory traffic. Wider Q/K/V buffers protect accumulated precision.
-- **Softmax accuracy vs cost:** row-max subtraction plus a small LUT is stable and cheap. Finer LUT spacing, interpolation, or base-2 exponentiation improves accuracy at added area.
-- **Divider cost:** the prototype's `/` keeps behavior transparent. A reciprocal unit is the most important production optimization.
-- **Buffering:** simple register arrays make the example portable. Larger N/D should use inferred SRAM/BRAM and tiled dataflow.
-- **Pipelining:** this FSM is non-pipelined. Registering multiplier outputs and overlapping load/compute would improve frequency and utilization.
+`golden_model.py` implements the same rounding, saturation, exponential LUT, and integer normalization as the RTL. The test flow performs three checks:
 
-## Interview connection to INT8 accelerator research
+1. The SystemVerilog testbench compares every output against `expected_o.hex`.
+2. Python reads each generated output text file and checks exact equality.
+3. The Makefile checks that both VCD and output files are nonempty.
 
-This implementation directly connects prior INT8 fixed-point and efficient-accelerator experience to attention hardware: explicit quantization scales are carried across every operator; accumulator growth, requantization, rounding, saturation, and overflow bounds are first-class architectural choices; row-max subtraction stabilizes a low-precision softmax; and the sequential MAC exposes an easy baseline for discussing data reuse, tiling, PE arrays, memory bandwidth, and throughput/area scaling. A useful interview narrative is to present this verified scalar baseline first, quantify its error and latency, and then explain how the same bit-accurate contract can support a pipelined or systolic implementation without changing the reference model.
+The sequential and pipelined output text files are also identical for the supplied test.
 
-PEANO-ViT is a particularly relevant comparison point because it targets power-efficient approximations of Vision Transformer nonlinearities, including softmax. Its approximation ideas can replace the baseline exp LUT/normalizer here while retaining the surrounding Q/K/V, score, output, and verification infrastructure. In an interview, describe PEANO-ViT as prior-art motivation or as a separately measured extension; do not claim that this repository reproduces its complete datapath or published power results.
+## Limitations
 
-## Verification strategy
+- Only one deterministic input set is currently included.
+- The LUT error is measured for the supplied example, not across a full model dataset.
+- No synthesis, place-and-route, frequency, area, or power result is claimed.
+- The pipelined divider is still combinational.
+- Larger dimensions need SRAM/BRAM mapping and a tiled dataflow rather than full unrolling.
 
-Verification has three independent layers:
+## Related work
 
-1. `golden_model.py` regenerates inputs and expected results with the exact RTL rounding, saturation, LUT, and normalization rules.
-2. The HDL testbench compares every DUT output against `expected_o.hex` and has a bounded timeout.
-3. Python parses the generated `output.txt`, checks exact matrix equality, reports intermediate tensors, and compares the quantized output against ideal floating point.
+PEANO-ViT is relevant prior work on hardware approximation of Vision Transformer nonlinear functions. This repository does not implement or reproduce its datapath; it uses a separate row-max and LUT-based softmax.
 
-The test is deterministic and uses only the Python standard library.
-
-## Synthesis notes
-
-Both files under `rtl/` are synthesizable SystemVerilog. The testbench, file I/O, and VCD calls are intentionally separate. Exact inferred resources depend on synthesis settings: array memories may become registers for this tiny instance, mutually exclusive baseline expressions may share a DSP, unrolled products may map to many DSPs, and integer normalization may infer large combinational dividers. Synthesis reports—not RTL operator counts—must be used for final area, frequency, and power claims.
+M. E. Sadeghi, A. Fayyazi, S. Azizi, and M. Pedram, “PEANO-ViT: Power-Efficient Approximations of Non-Linearities in Vision Transformers,” ISLPED, 2024. [arXiv](https://arxiv.org/abs/2406.14854), [DOI](https://doi.org/10.1145/3665314.3670843).
 
 ## License
 
-MIT; see `LICENSE`.
-
-## Reference
-
-M. E. Sadeghi, A. Fayyazi, S. Azizi, and M. Pedram, “PEANO-ViT: Power-Efficient Approximations of Non-Linearities in Vision Transformers,” *ISLPED*, 2024. [arXiv:2406.14854](https://arxiv.org/abs/2406.14854), [DOI: 10.1145/3665314.3670843](https://doi.org/10.1145/3665314.3670843).
+MIT

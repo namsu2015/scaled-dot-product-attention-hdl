@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 
-// Aggressively pipelined, spatially unrolled alternative to attention_core.sv.
+// High-throughput, spatially unrolled alternative to attention_core.sv.
 // Registers separate multiply, reduction, scaling, softmax, and output phases.
 module attention_core_pipelined #(
     parameter integer N              = 2,
